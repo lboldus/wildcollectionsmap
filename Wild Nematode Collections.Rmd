@@ -1,0 +1,178 @@
+---
+title: "Wild Nematode Collections"
+author: "Lainie Boldus"
+date: "2025-08-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+## Current Wild Collections Map R Code
+```{r}
+library(readr)
+library(dplyr)
+library(glue)
+library(leaflet)
+library(rlang)
+
+# Load & prep
+raw <- read_csv("/Users/lainieboldus/Desktop/Grad School/Crombie Lab/completedatasheetwildnematodecol.csv")
+
+library(stringr)
+
+df <- raw %>%
+  rename(
+    collection_longitude = GPSLongitude,
+    collection_latitude  = GPSLatitude,
+    collection_by        = collected_by,
+    collection_location  = landscape,
+    sample_photo1_processed_url = raw_col_img_name
+  ) %>%
+  mutate(
+    collection_latitude  = as.numeric(collection_latitude),
+    collection_longitude = as.numeric(collection_longitude),
+    
+    # normalize species labels
+    species_norm = species_id |>
+      str_trim() |>
+      str_squish() |>
+      str_replace_all("\\.", "") |>       # remove dots in "C. elegans"
+      str_to_lower(),
+    
+    species_code = case_when(
+      str_detect(species_norm, "elegans") ~ "Ce",
+      str_detect(species_norm, "briggsae") ~ "Cb",
+      str_detect(species_norm, "oscheius") ~ "Om",
+      species_norm == "om" ~ "Om",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  # assign color from species_code
+  mutate(color_tmp = case_when(
+    species_code == "Om" ~ "red",
+    species_code == "Cb" ~ "orange",
+    species_code == "Ce" ~ "blue",
+    TRUE ~ "black"
+  )) %>%
+  # group by c_label so all rows share the same color
+  group_by(c_label) %>%
+  mutate(
+    color = case_when(
+      any(species_code == "Om", na.rm = TRUE) ~ "red",
+      any(species_code == "Cb", na.rm = TRUE) ~ "orange",
+      any(species_code == "Ce", na.rm = TRUE) ~ "blue",
+      TRUE ~ "black"
+    )
+  ) %>%
+  ungroup()
+
+
+# keep your substrate safeguard
+if (!"substrate" %in% names(df)) df$substrate <- NA_character_
+
+map_target_species <- function(df, color_use) {
+  # Build icons with NAMED args
+  icos <- iconList(
+    red    = makeIcon(iconUrl = "https://storage.googleapis.com/andersenlab.org/img/red.svg",
+                      iconWidth = 15, iconHeight = 15,
+                      iconAnchorX = 7.5, iconAnchorY = 15,
+                      popupAnchorX = 0, popupAnchorY = -15),
+    orange = makeIcon(iconUrl = "https://storage.googleapis.com/andersenlab.org/img/orange.svg",
+                      iconWidth = 15, iconHeight = 15,
+                      iconAnchorX = 7.5, iconAnchorY = 15,
+                      popupAnchorX = 0, popupAnchorY = -15),
+    blue   = makeIcon(iconUrl = "https://storage.googleapis.com/andersenlab.org/img/blue.svg",
+                      iconWidth = 15, iconHeight = 15,
+                      iconAnchorX = 7.5, iconAnchorY = 15,
+                      popupAnchorX = 0, popupAnchorY = -15),
+    black  = makeIcon(iconUrl = "https://storage.googleapis.com/andersenlab.org/img/black.svg",
+                      iconWidth = 15, iconHeight = 15,
+                      iconAnchorX = 7.5, iconAnchorY = 15,
+                      popupAnchorX = 0, popupAnchorY = -15)
+  )
+  
+  df2 <- df %>%
+    filter(!is.na(collection_longitude), !is.na(collection_latitude)) %>%
+    filter(!is.na(.data[[color_use]])) %>%
+    mutate(substrate = if_else(is.na(substrate), "", substrate)) %>%
+    arrange(species_id)
+  
+  if (nrow(df2) == 0) {
+    stop("No rows to map: check latitude/longitude and the '", color_use, "' column.")
+  }
+  
+  # Per-row icons (default unknowns to blue)
+  keys <- as.character(df2[[color_use]])
+  keys[is.na(keys) | !(keys %in% names(icos))] <- "blue"
+  icon_vec <- unname(icos[keys])  # ensure a plain list, length == nrow(df2)
+  
+  # Popups
+  # Popups (no photos)
+  popups <- glue::glue_data(
+    df2,
+    "<h2>{c_label}</h2><hr />
+   <strong>Collected by:</strong> {collection_by}<br />
+   <strong>Latitude, Longitude:</strong> {format(round(collection_latitude, 6), nsmall = 6)}, {format(round(collection_longitude, 6), nsmall = 6)}<br />
+   <strong>Collection location:</strong> {collection_location}<br />
+   <strong>Substrate:</strong> {substrate}"
+  )
+  # Bounds for auto-zoom
+  lng1 <- min(df2$collection_longitude, na.rm = TRUE)
+  lng2 <- max(df2$collection_longitude, na.rm = TRUE)
+  lat1 <- min(df2$collection_latitude,  na.rm = TRUE)
+  lat2 <- max(df2$collection_latitude,  na.rm = TRUE)
+  
+  leaflet(df2, width = "100%", options = leafletOptions(zoomControl = TRUE)) %>%
+    # Use reliable basemaps (Stamen often fails now)
+    addProviderTiles("CartoDB.Positron") %>%
+    addProviderTiles("Esri.WorldTopoMap", group = "Esri Topo") %>%
+    
+    # Add a fallback layer so you always see something even if icons fail
+    addCircleMarkers(
+      lng = ~collection_longitude, lat = ~collection_latitude,
+      radius = 4, stroke = FALSE, fillOpacity = 0.8, group = "Circles"
+    ) %>%
+    
+    # Icon markers
+    addMarkers(
+      lng = ~collection_longitude, lat = ~collection_latitude,
+      icon = icon_vec, popup = popups, popupOptions = popupOptions(maxWidth = 500),
+      group = "Icons"
+    ) %>%
+    
+    addLayersControl(
+      overlayGroups = c("Icons", "Circles"),
+      options = layersControlOptions(collapsed = FALSE)
+    ) %>%
+    fitBounds(lng1, lat1, lng2, lat2)
+}
+
+# Render
+m <- map_target_species(df, color_use = "color")
+m  # or print(m) in a plain R script
+
+# Create an HMTL version of the code
+
+library(htmlwidgets)
+
+htmlwidgets::saveWidget(
+  widget = m,
+  file = "index.html",
+  title = "Wild Nematode Collection Map",
+  selfcontained = TRUE   # <— packs dependencies into one file
+)
+
+```
+
+## Current Wild Nematode Collection Map link
+
+https://lboldus.github.io/wildcollectionsmap/
+
